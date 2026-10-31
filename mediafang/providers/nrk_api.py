@@ -67,6 +67,7 @@ class Instalment:
     original_title: str | None = None
     # When it can be watched on demand; NRK lists tonight's broadcast as "available" before that
     rights_from: datetime | None = None
+    coming: bool = False  # NRK lists it ahead of time ("Kommer om 6 dager")
 
 
 @dataclass
@@ -235,6 +236,7 @@ def _instalment(e: dict) -> Instalment:
         year=e.get("productionYear"),
         original_title=e.get("originalTitle"),
         rights_from=_datetime((rights.get("from") or {}).get("date")),
+        coming=(e.get("availability") or {}).get("status") == "coming",
     )
 
 

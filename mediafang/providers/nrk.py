@@ -63,6 +63,7 @@ def lookup(kind: str, ref: str) -> Info:
             available=p.available, expires=p.expires,
         )
     s = nrk_api.series(ref)
+    last, upcoming = outlook(s)
     if s.dated:
         years = sorted({r.name[:4] for r in s.seasons if r.name[:4].isdigit()}, reverse=True)
         choices = [Choice(y, y) for y in years]
@@ -70,8 +71,25 @@ def lookup(kind: str, ref: str) -> Info:
         choices = [Choice(r.name, r.title) for r in s.seasons]
     return Info(
         "nrk", kind, s.slug, s.title, s.plot, s.image, s.poster, s.backdrop, s.series_type,
-        url=f"https://tv.nrk.no/serie/{s.slug}", choices=choices,
+        url=f"https://tv.nrk.no/serie/{s.slug}", choices=choices, last_aired=last, next_aired=upcoming,
     )
+
+
+def outlook(series: Series, fetched: dict[str, list[Instalment]] | None = None) -> tuple[date | None, date | None]:
+    """When the latest episode came out, and when the next one NRK lists will. NRK never says a
+    series has ended; nothing listed and a long time since the last one is as close as it gets.
+    fetched: seasons already looked up, by name."""
+    last = upcoming = None
+    for ref in newest_seasons(series):
+        found = (fetched or {}).get(ref.name)
+        for inst in nrk_api.season(series.slug, ref.name) if found is None else found:
+            start = inst.rights_from or inst.released
+            if inst.coming or (start and start > datetime.now(start.tzinfo)):
+                if start and (upcoming is None or start.date() < upcoming):
+                    upcoming = start.date()
+            elif (day := inst.aired or (inst.released.date() if inst.released else None)) and (last is None or day > last):
+                last = day
+    return last, upcoming
 
 
 # ---- what to fetch -------------------------------------------------------------
@@ -159,6 +177,8 @@ def plan(source: Source, series: Series, ref: SeasonRef, position: int, inst: In
 def scan(db: DB, source: Source, cfg: Config | None = None) -> int:
     """Look up what NRK has for a source and record new episodes. Returns how many."""
     if source.kind == "program":
+        if (known := db.item("nrk", source.ref)) and known.status == "done":
+            return 0  # nothing more will come of it
         p = nrk_api.program(source.ref)
         db.update_meta(source.id, plot=p.plot, image=p.image, poster=p.poster, backdrop=p.backdrop)
         if not p.available:
@@ -176,11 +196,15 @@ def scan(db: DB, source: Source, cfg: Config | None = None) -> int:
     )
     source = db.source(source.id)
     new = 0
+    fetched: dict[str, list[Instalment]] = {}
     for ref in seasons_to_scan(source, series, db.scanned(source.id)):
-        for position, inst in enumerate(nrk_api.season(series.slug, ref.name)):
+        fetched[ref.name] = nrk_api.season(series.slug, ref.name)
+        for position, inst in enumerate(fetched[ref.name]):
             if wanted(source, inst):
                 new += db.add_item(plan(source, series, ref, position, inst), unique_number=series.dated)
         db.mark_scanned(source.id, ref.name)
+    last, upcoming = outlook(series, fetched)
+    db.update_meta(source.id, last_aired=last, next_aired=upcoming)
     if new:
         log.info("%s: %d new episode(s)", source.title, new)
     return new

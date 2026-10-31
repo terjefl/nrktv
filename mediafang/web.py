@@ -166,6 +166,36 @@ def code(source: Source, item: Item) -> str:
     return f"S{item.season:02d}E{item.episode:02d}"
 
 
+# NRK never says a series has ended: with nothing listed, this long since the last episode is the sign.
+# Talk shows and news take a summer break; drama can go a year or two between seasons
+ENDED_AFTER_DAYS = {True: 183, False: 730}
+
+
+def is_program(source: Source) -> bool:
+    """A single NRK program or film: downloaded once, not followed."""
+    return source.provider == "nrk" and source.kind == "program"
+
+
+def outlook_chip(series_type: str, last: date | None, upcoming: date | None) -> str:
+    """What NRK has coming for a series, or that nothing has come for a long time."""
+    if upcoming:
+        return f'<span class="chip ok">ny episode {upcoming.strftime("%d.%m")}</span>'
+    if not last:
+        return ""
+    if (date.today() - last).days > ENDED_AFTER_DAYS[series_type != "sequential"]:
+        return f'<span class="chip" title="NRK har ingen nye episoder på listen">trolig avsluttet · siste {_date(last)}</span>'
+    return f'<span class="chip">siste episode {_date(last)}</span>'
+
+
+def program_status(counts: dict[str, int]) -> tuple[str, str]:
+    """(label, chip class) for a single program's one item."""
+    for status, cls in (("done", "ok"), ("failed", "bad"), ("pending", "")):
+        if counts.get(status):
+            return STATUS[status] if status != "pending" else "I kø", cls
+    status = next(iter(counts), "")
+    return (STATUS.get(status, status), "warn") if status else ("Sjekkes", "")
+
+
 def kind_label(source: Source) -> str:
     if source.provider in ("youtube", "adhoc"):
         return LAYOUTS.get(source.layout, source.layout)
@@ -176,7 +206,7 @@ def kind_label(source: Source) -> str:
 
 def mode_text(source: Source) -> str:
     if source.kind == "program":
-        return "Enkeltprogram"
+        return "Enkeltprogram, lastes ned én gang"
     if source.provider == "adhoc":
         where = f"{source.library}/{source.folder}" if source.folder else f"{source.library}/<kanal>"
         return f"Det du henter selv · {where}"
@@ -214,8 +244,11 @@ class App:
         if not sources:
             body += '<div class="empty">Ingenting her ennå. Søk etter en serie, eller lim inn en lenke over.</div>'
             return page("Følger", body)
+        programs = [s for s in sources if is_program(s)]
         cards = []
         for s in sources:
+            if is_program(s):
+                continue
             c = counts.get(s.id, {})
             chips = [f'<span class="chip {s.provider}">{providers.NAMES[s.provider]}</span>',
                      f'<span class="chip">{_e(kind_label(s))}</span>']
@@ -229,6 +262,8 @@ class App:
                 chips.append(f'<span class="chip">{_size(sizes[s.id])}</span>')
             if s.id in expiry:
                 chips.append(f'<span class="chip warn">utløper {_date(expiry[s.id])}</span>')
+            if s.provider == "nrk":
+                chips.append(outlook_chip(s.series_type, s.last_aired, s.next_aired))
             if not s.enabled:
                 chips.append('<span class="chip warn">pauset</span>')
             toggle = "Fortsett" if not s.enabled else "Pause"
@@ -243,8 +278,25 @@ class App:
 <div class="actions">{edit}
 <form method="post" action="/pause"><input type="hidden" name="id" value="{s.id}"><button>{toggle}</button></form>
 {unfollow}</div></div></div>""")
-        body += f'<div class="grid">{"".join(cards)}</div>'
+        if cards:
+            body += f'<div class="grid">{"".join(cards)}</div>'
+        if programs:
+            body += self._programs(programs, counts, sizes, expiry, heading=bool(cards))
         return page("Følger", body)
+
+    def _programs(self, programs: list[Source], counts, sizes, expiry, heading: bool) -> str:
+        """Single NRK programs and films: a list of what was fetched, not cards to follow."""
+        rows = []
+        for s in programs:
+            label, cls = program_status(counts.get(s.id, {}))
+            rows.append(f"""<tr><td><a href="/kilde/{s.id}">{_e(s.folder_name)}</a></td>
+<td><span class="chip {cls}">{_e(label)}</span></td><td class="code">{_size(sizes.get(s.id, 0))}</td>
+<td class="code">{_date(expiry.get(s.id))}</td><td style="white-space:nowrap">
+<form method="post" action="/slett" style="margin:0" onsubmit="return confirm('Fjerne {_e(s.folder_name)} fra listen? Filen blir liggende.')">
+<input type="hidden" name="id" value="{s.id}"><button class="danger">Fjern</button></form></td></tr>""")
+        head = '<h2>Filmer og enkeltprogrammer</h2>' if heading else ""
+        return (head + '<div class="tablewrap"><table><tr><th>Tittel</th><th>Status</th><th>Størrelse</th><th>Utløper</th>'
+                '<th></th></tr>' + "".join(rows) + "</table></div>")
 
     def _queue(self) -> str:
         p = self.progress
@@ -296,7 +348,8 @@ class App:
             hits = providers.get("youtube" if youtube else "nrk").search(q)
         except Exception as e:
             return page("Søk", f'<div class="empty">Søket feilet: {_e(e)}</div>', q)
-        followed = {(s.provider, s.ref) for s in self.db.sources()}
+        followed = {(s.provider, s.ref): s for s in self.db.sources()}
+        counts = self.db.counts()
         where = "YouTube" if youtube else "NRK TV"
         other = (f'<a class="btn" href="/sok?q={urllib.parse.quote(q)}">Søk i NRK TV i stedet</a>' if youtube else
                  f'<a class="btn" href="/sok?q={urllib.parse.quote(q)}&yt=1">Søk etter YouTube-kanaler</a>')
@@ -306,10 +359,16 @@ class App:
         cards = []
         for h in hits:
             kind = {"series": "Serie", "program": "Film / program", "channel": "Kanal", "playlist": "Spilleliste"}[h.kind]
-            action = (
-                '<span class="chip ok">Følger</span>' if (h.provider, h.ref) in followed else
-                f'<a class="btn" href="/folg?provider={h.provider}&kind={h.kind}&ref={urllib.parse.quote(h.ref)}">Følg …</a>'
-            )
+            link = f"/folg?provider={h.provider}&kind={h.kind}&ref={urllib.parse.quote(h.ref)}"
+            if (have := followed.get((h.provider, h.ref))) and is_program(have):
+                label, cls = program_status(counts.get(have.id, {}))
+                action = f'<a class="chip {cls}" href="/kilde/{have.id}">{_e(label)}</a>'
+            elif have:
+                action = f'<a class="chip ok" href="/kilde/{have.id}">Følger</a>'
+            elif h.provider == "nrk" and h.kind == "program":
+                action = f'<a class="btn" href="{link}">Last ned …</a>'
+            else:
+                action = f'<a class="btn" href="{link}">Følg …</a>'
             cards.append(f"""<div class="card">{picture(h.image, h.title)}<div class="body">
 <h3>{_e(h.title)}</h3><div class="chips"><span class="chip {h.provider}">{providers.NAMES[h.provider]}</span>
 <span class="chip">{kind}</span></div><div class="muted">{_e(h.description[:220])}</div>
@@ -328,9 +387,17 @@ class App:
             options = "" if info.available else '<div class="flash">NRK viser ikke dette programmet nå.</div>'
             if info.expires:
                 options += f'<div class="muted">Tilgjengelig hos NRK til {_date(info.expires)}.</div>'
+            options += '<div class="muted">Lastes ned én gang til filmbiblioteket, uten å følges videre.</div>'
         else:
             options = self._nrk_series_options(info, existing)
         verb = "Lagre" if existing else "Følg"
+        if provider == "nrk" and kind == "program":
+            verb = "Last ned"
+            if existing:  # nothing to choose for a single program: say how it went
+                label, cls = program_status(self.db.counts().get(existing.id, {}))
+                return page(info.title, f"""<div class="panel"><div class="hero">{picture(info.image or info.poster, info.title)}
+<div class="text"><h2 style="margin-top:0">{_e(info.title)}</h2><div class="muted">{_e(info.plot[:600])}</div>
+<p><span class="chip {cls}">{_e(label)}</span></p><a class="btn" href="/kilde/{existing.id}">Vis</a></div></div></div>""")
         body = f"""<form method="post" action="/folg" class="panel">
 <input type="hidden" name="provider" value="{_e(provider)}"><input type="hidden" name="kind" value="{_e(info.kind)}">
 <input type="hidden" name="ref" value="{_e(info.ref)}">
@@ -364,7 +431,7 @@ class App:
             keep += '<div class="muted">Nyhetsserier har ofte tusenvis av sendinger; «Alt som finnes» henter alle.</div>'
         what = "år" if dated else "sesonger"
         return f"""<div class="chips"><span class="chip nrk">NRK</span><span class="chip">{TYPES.get(info.series_type, "Serie")}</span>
-<span class="chip">{len(info.choices)} {what}</span></div>
+<span class="chip">{len(info.choices)} {what}</span>{outlook_chip(info.series_type, info.last_aired, info.next_aired)}</div>
 <fieldset><legend>Hva skal lastes ned?</legend>{radios}
 <div class="muted">Velg {what} under hvis du velger «{MODES["seasons"]}».</div>
 <div class="seasons">{boxes}</div></fieldset>{keep}"""
@@ -448,6 +515,7 @@ class App:
             + "".join(rows) + "</table></div>"
             if rows else '<div class="empty">Ingenting funnet ennå. Det dukker opp etter neste sjekk.</div>'
         )
+        outlook = outlook_chip(source.series_type, source.last_aired, source.next_aired) if source.provider == "nrk" else ""
         feed = ""
         if source.layout == "audio":
             url = f"/feed/{source.feed_token}.xml"
@@ -455,7 +523,8 @@ class App:
         body = f"""<div class="panel"><div class="hero">{picture(source.image or source.poster, source.folder_name)}
 <div class="text"><h2 style="margin-top:0">{_e(source.folder_name)}</h2><div class="muted">{_e(source.plot[:600])}</div>
 <p class="muted">{_e(kind_label(source))} · {_e(mode_text(source))}</p>{feed}
-{"" if source.provider == "adhoc" else f'<a class="btn" href="{self._edit_link(source)}">Endre</a>'}
+{f'<div class="chips">{outlook}</div>' if outlook else ""}
+{"" if source.provider == "adhoc" or is_program(source) else f'<a class="btn" href="{self._edit_link(source)}">Endre</a>'}
 {"" if source.provider == "adhoc" else f'<a class="btn" href="{_e(provider.page_url(source))}">Se hos {providers.NAMES[source.provider]}</a>'}
 </div></div></div><h2>Innhold</h2>{table}"""
         return page(source.folder_name, body)

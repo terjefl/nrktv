@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, fields
 from datetime import date, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS sources (
     feed_token TEXT,
     last_full_index REAL NOT NULL DEFAULT 0,
     last_checked REAL NOT NULL DEFAULT 0,
+    last_aired TEXT,                   -- NRK series: the latest episode out
+    next_aired TEXT,                   -- and the next one NRK lists
     UNIQUE (provider, ref)
 );
 CREATE TABLE IF NOT EXISTS seasons (
@@ -97,7 +99,7 @@ SETTINGS = (
     "min_duration", "max_duration", "shorts", "livestreams", "sponsorblock", "sb_categories", "subtitles",
     "cookies", "quality",
 )
-META = ("title", "plot", "series_type", "image", "poster", "backdrop")
+META = ("title", "plot", "series_type", "image", "poster", "backdrop", "last_aired", "next_aired")
 
 
 @dataclass
@@ -135,6 +137,8 @@ class Source:
     feed_token: str | None = None
     last_full_index: float = 0.0
     last_checked: float = 0.0
+    last_aired: date | None = None
+    next_aired: date | None = None
 
     @property
     def dated(self) -> bool:
@@ -184,7 +188,8 @@ def _source(r: sqlite3.Row) -> Source:
     d = dict(r)
     d["seasons"] = json.loads(d["seasons"])
     d["since"] = datetime.fromisoformat(d["since"])
-    d["cutoff"] = date.fromisoformat(d["cutoff"]) if d["cutoff"] else None
+    for key in ("cutoff", "last_aired", "next_aired"):
+        d[key] = date.fromisoformat(d[key]) if d[key] else None
     for key in ("enabled", "shorts", "livestreams", "cookies"):
         d[key] = bool(d[key])
     return Source(**d)
@@ -226,6 +231,11 @@ class DB:
             for column in ("url", "channel"):
                 if column not in have:
                     c.execute(f"ALTER TABLE items ADD COLUMN {column} TEXT")
+            # v4: last_aired and next_aired on sources
+            have = {r[1] for r in c.execute("PRAGMA table_info(sources)")}
+            for column in ("last_aired", "next_aired"):
+                if column not in have:
+                    c.execute(f"ALTER TABLE sources ADD COLUMN {column} TEXT")
             c.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     @contextmanager
@@ -297,7 +307,7 @@ class DB:
         return self.source(sid)
 
     def update_meta(self, source_id: int, **values) -> None:
-        values = {k: v for k, v in values.items() if k in META}
+        values = {k: _db_value(k, v) for k, v in values.items() if k in META}
         if not values:
             return
         with self.conn() as c:

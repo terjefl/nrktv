@@ -294,3 +294,40 @@ def test_ready_at_waits_for_the_recording(monkeypatch):
     assert psapi.ready_at("LIVECOPY") > datetime.now().astimezone()
     assert psapi.ready_at("EDGECOPY") > datetime.now().astimezone()
     assert psapi.ready_at("RECORDING") is None
+
+
+def test_outlook(fake_api, monkeypatch):
+    lindmo = psapi.series("lindmo")
+    last, upcoming = planner.outlook(lindmo)
+    assert upcoming is None
+    assert last == max(i.aired for i in psapi.season("lindmo", "2024"))
+
+    soon = datetime.now().astimezone() + timedelta(days=6)
+    coming = psapi.Instalment("X", "", "", None, None, soon, None, False, False, None, rights_from=soon, coming=True)
+    assert planner.outlook(lindmo, {"2024": [coming], "2023": []}) == (None, soon.date())
+
+
+def test_scan_stores_outlook(fake_api, cfg, db):
+    follow = db.save_source("nrk", "series", "lindmo", "Lindmo")
+    Harvester(cfg, db).scan(follow)
+    assert db.source(follow.id).last_aired == planner.outlook(psapi.series("lindmo"))[0]
+
+
+def test_done_program_is_not_looked_up_again(fake_api, cfg, db, monkeypatch):
+    follow = db.save_source("nrk", "program", "KOID22008424", "Kongehusets hemmelige millioner")
+    h = Harvester(cfg, db)
+    h.scan(follow)
+    db.set_status(db.item("nrk", "KOID22008424"), "done")
+    monkeypatch.setattr(psapi, "get", lambda path: pytest.fail(f"looked up {path}"))
+    assert h.scan(follow) == 0
+
+
+def test_outlook_chip():
+    from mediafang.web import outlook_chip
+
+    today = date.today()
+    assert "ny episode" in outlook_chip("sequential", today, today + timedelta(days=3))
+    assert "trolig avsluttet" in outlook_chip("sequential", today - timedelta(days=800), None)
+    assert "trolig avsluttet" not in outlook_chip("sequential", today - timedelta(days=400), None)
+    assert "trolig avsluttet" in outlook_chip("standard", today - timedelta(days=200), None)
+    assert outlook_chip("sequential", None, None) == ""

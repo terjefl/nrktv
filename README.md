@@ -16,7 +16,12 @@ It replaces Pinchflat for YouTube (and took over its library), and was nrktv bef
 - **Date series** (Lindmo, Dagsrevyen) have no episode numbers at NRK: the season is the year and
   the episode number is made from the date, 22 October = `S2026E102201`. They can keep only the
   last N days.
-- **Films and single programs** go to a separate movie library.
+- **Films and single programs** go to a separate movie library. They are downloaded once, not
+  followed: *Last ned* instead of *Følg*, and a list of their own under the series on the page.
+- **Is there more coming?** NRK has no flag for a series that has ended, but it lists the next
+  episode ahead of time. Each series shows *ny episode* with its date, the date of the latest one,
+  or *trolig avsluttet* when nothing is listed and the latest is over half a year old (talk shows
+  and news) or two years old (drama, which can go a year between seasons).
 - Episodes whose rights end soonest are downloaded first. Broadcasts NRK lists while they are
   still on air wait until the recording is out; ended rights and Norway-only content are marked.
 

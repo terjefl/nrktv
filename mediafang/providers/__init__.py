@@ -49,6 +49,8 @@ class Info:
     choices: list[Choice] = field(default_factory=list)
     available: bool = True
     expires: date | None = None
+    last_aired: date | None = None  # NRK series: the latest episode out, and the next one listed
+    next_aired: date | None = None
 
 
 def get(name: str):
